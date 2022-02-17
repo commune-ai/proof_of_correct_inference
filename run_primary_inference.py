@@ -36,10 +36,9 @@ def run_pytorch(images, model, device='cuda'):
 
     return output, preds
 
-def convert_to_onnx(torch_model, batch_size=1):
+def convert_to_onnx(torch_model, batch_size=1, onnx_filename='models/tmp.onnx'):
     torch.manual_seed(123)
     model_input = torch.randn(batch_size, 3, 224, 224, requires_grad=False, device='cuda', dtype=torch.float)
-    onnx_filename = 'tmp.onnx'
     torch.onnx.export(
             torch_model,
             model_input,
@@ -57,8 +56,10 @@ def convert_to_onnx(torch_model, batch_size=1):
     return onnx_filename
 
 if __name__ == '__main__':
-    quantize_bits = 11
-    n_images = 100
+    max_mag_bits = 6
+    quantize_bits = 63
+    n_images = 10
+    model_name = 'vgg16'
     print('Loading images...')
     if not os.path.exists(image_dataset_local):
         download_images()
@@ -67,23 +68,26 @@ if __name__ == '__main__':
     images = images.astype(np.float32)
 
     print('Quantizing input...')
-    images_uint64, images_float64_converted = quantize(images, quantize_bits=quantize_bits)
-    print(hashlib.sha256(images_uint64.tobytes()).hexdigest())
+    images_uint64, images_float64_converted = quantize(images,
+            quantize_bits=quantize_bits, max_mag_bits=max_mag_bits)
+    input_hash_string = hashlib.sha256(images_uint64.tobytes()).hexdigest()
+    with open(f'image_hashes/{n_images}', 'w') as f:
+        f.write(input_hash_string)
 
     print('Loading model...')
-    model = models.vgg16(pretrained=True).cuda().eval()
+    model = getattr(models, model_name)(pretrained=True).cuda().eval()
     
     print('Running pytorch model')
     output, preds = run_pytorch(images, model, device='cuda')
     output = output.numpy()
-    output_uint64, output_float64_converted = quantize(output, quantize_bits=quantize_bits)
-
-    print(output)
-    print(output_float64_converted)
-    print(hashlib.sha256(output_uint64.tobytes()).hexdigest())
+    output_uint64, output_float64_converted = quantize(output,
+            quantize_bits=quantize_bits, max_mag_bits=max_mag_bits)
+    np.savez_compressed(f'primary_inference_output/{model_name}_pt_N{n_images}_mmb{max_mag_bits}_qb{quantize_bits}.npz',
+            array=output_uint64)
 
     print('Converting to onnx...')
-    onnx_filename = convert_to_onnx(model)
+    onnx_filename = f'models/{model_name}.onnx'
+    convert_to_onnx(model, onnx_filename=onnx_filename)
     ort_session = load_onnx_model(onnx_filename)
 
     print('Running onnx model...')
@@ -91,9 +95,9 @@ if __name__ == '__main__':
     ort_inputs = {'input': images_onnx}
     ort_output = ort_session.run(None, ort_inputs)[0]
     ort_preds = np.argmax(ort_output, axis=1)
-
-    ort_output_uint64, ort_output_float64_converted = quantize(ort_output, quantize_bits=quantize_bits)
-    
     print(ort_output)
-    print(ort_output_float64_converted)
-    print(hashlib.sha256(ort_output_uint64.tobytes()).hexdigest())
+
+    ort_output_uint64, ort_output_float64_converted = quantize(ort_output,
+            quantize_bits=quantize_bits, max_mag_bits=max_mag_bits)
+    np.savez_compressed(f'primary_inference_output/{model_name}_onnx_N{n_images}_mmb{max_mag_bits}_qb{quantize_bits}.npz',
+            array=ort_output_uint64)
